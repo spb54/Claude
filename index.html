@@ -540,7 +540,7 @@ body.fs-open{overflow:hidden}
         inRun=true; shift=0;
         if(prev!==null){ const k=(prev-n.midi)/12; shift=(Math.abs(Math.abs(k)%1-0.5)<1e-9?Math.trunc(k):Math.round(k))*12; }
       }
-      n.midi+=shift; n.oct+=shift/12;
+      n.origMidi=n.midi; n.midi+=shift; n.oct+=shift/12;
     });
   }
   // Full screen: run all the written lines together (with a bar line where they join), so rows
@@ -867,21 +867,27 @@ body.fs-open{overflow:hidden}
     if(playBus){try{playBus.gain.cancelScheduledValues(0);playBus.gain.setValueAtTime(0,ac.currentTime);playBus.disconnect();}catch(e){}playBus=null;}
     timers.forEach(clearTimeout);timers=[];document.querySelectorAll(".nt.on").forEach(e=>e.classList.remove("on"));playing=false;setPlayLabel("Play");}
   function setPlayLabel(t){if(t==="Play"&&playLocked())t="Play 🔒";$("play").textContent=t;$("fsPlay").textContent=t;updatePlayUI();}
-  $("play").addEventListener("click",()=>{
+  $("play").addEventListener("click",async()=>{
     if(playing){stop();return;}
     if(playLocked()) return;
     if(lis.on) stopListen(); // Play stops listening first, so the microphone does not hear it
     lockPlay();
     const a=audio();playing=true;setPlayLabel("Stop");
+    // Wait until the sound is really running, then start after a short lead-in (longer straight after the
+    // microphone, while a phone or tablet switches back from recording), so the first notes are not lost.
+    if(a&&a.state!=="running"){try{await a.resume();}catch(e){}}
+    if(!playing) return;
+    const lead=performance.now()-lis.stoppedAt<3000?0.9:0.4;
+    const lat=a?(a.outputLatency||a.baseLatency||0):0;
     if(a){playBus=a.createGain();playBus.connect(a.destination);}
-    const spb=60/+$("bpm").value;let t0=0.1;
+    const spb=60/+$("bpm").value;let t0=lead;
     song.systems.forEach(sys=>{
       sys.rh.ev.concat(sys.lh.ev).forEach(({n,start})=>{
         if(n.type!=="note") return;
         const t=t0+start*spb, dur=n.beats*spb, el=n.el;
         tone(n.midi,t,dur*0.92,playBus);
-        if(el){timers.push(setTimeout(()=>{el.classList.add("on");followNote(el);},t*1000));
-          timers.push(setTimeout(()=>el.classList.remove("on"),(t+dur*0.85)*1000));}
+        if(el){timers.push(setTimeout(()=>{el.classList.add("on");followNote(el);},(t+lat)*1000));
+          timers.push(setTimeout(()=>el.classList.remove("on"),(t+lat+dur*0.85)*1000));}
       });
       t0+=sys.realLen*spb;
     });
@@ -1144,7 +1150,7 @@ body.fs-open{overflow:hidden}
   // The page listens for the pitch being played. When it is the note that is glowing (any octave),
   // the glow moves on. Other notes are ignored. A note repeated straight after itself needs a new strike.
   var lis={on:false,idx:0,stream:null,src:null,an:null,buf:null,raf:0,cand:-1,candN:0,lastPc:-1,struck:true,
-    fb:[],fbH:[],fbB:[],hfE:null,bbE:null,lastTick:0,heard:new Set(),needStrike:false,unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
+    fb:[],fbH:[],fbB:[],subHist:{},stoppedAt:-1e9,hfE:null,bbE:null,lastTick:0,heard:new Set(),needStrike:false,unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
   function melody(){
     const out=[];
     (song&&song.systems||[]).forEach(s=>s.rh.ev.forEach(e=>{if(e.n.type==="note"&&e.n.el)out.push(e.n);}));
@@ -1211,10 +1217,12 @@ body.fs-open{overflow:hidden}
     lis.stream=stream;lis.src=a.createMediaStreamSource(stream);
     lis.an=a.createAnalyser();lis.an.fftSize=2048;lis.an.smoothingTimeConstant=0;
     lis.src.connect(lis.an); // not connected to the speakers, so no feedback
+    lis.an2=a.createAnalyser();lis.an2.fftSize=8192;lis.an2.smoothingTimeConstant=0;lis.src.connect(lis.an2);
+    lis.db=new Float32Array(lis.an2.frequencyBinCount);lis.ring=[];lis.flux=new Float32Array(lis.an2.frequencyBinCount);lis.fluxHits=[];
     lis.buf=new Float32Array(lis.an.fftSize);
-    lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.heardPc=-1;lis.fb=[];lis.fbH=[];lis.fbB=[];lis.lastTick=performance.now();
+    lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.pStruck=true;lis.heardPc=-1;lis.fb=[];lis.fbH=[];lis.fbB=[];lis.lastTick=performance.now();
     // straight after Play the speaker is still ringing, so the first note needs a fresh key press
-    lis.needStrike=!!afterPlay;if(afterPlay){lis.struck=false;lis.matchAt=performance.now();}
+    lis.needStrike=!!afterPlay;if(afterPlay){lis.struck=false;lis.pStruck=false;lis.matchAt=performance.now();}
     if(lis.idx>=melody().length) lis.idx=0;
     setListenLabel();setHeard("Listening… play the glowing note.");
     listenMarks();followTarget();
@@ -1222,10 +1230,10 @@ body.fs-open{overflow:hidden}
   }
   function stopListen(){
     if(!lis.on) return;
-    lis.on=false;cancelAnimationFrame(lis.raf);
+    lis.on=false;lis.stoppedAt=performance.now();cancelAnimationFrame(lis.raf);
     try{lis.src&&lis.src.disconnect();}catch(e){}
     try{lis.stream&&lis.stream.getTracks().forEach(t=>t.stop());}catch(e){}
-    lis.stream=lis.src=lis.an=null;
+    lis.stream=lis.src=lis.an=lis.an2=null;
     setHeard("");setListenLabel();listenMarks();
   }
   function followTarget(){const t=lisTarget();if(t&&t.el)followNote(t.el);}
@@ -1291,14 +1299,24 @@ body.fs-open{overflow:hidden}
     // A key press resets the pitch check, so the new note has to settle before it counts
     // (a note still ringing is not credited with the next key's press).
     const now=performance.now();
-    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.struck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;}
+    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.struck=true;lis.pStruck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;lis.fluxHits=[];}
     // background noise: the quietest moment of the last 8 seconds
     const fb=lis.fb, cur=fb[fb.length-1];
     if(!cur||now-cur.t>500){fb.push({t:now,m:rms});if(fb.length>16)fb.shift();}else if(rms<cur.m)cur.m=rms;
     lis.floor=Math.max(0.0003,Math.min(...fb.map(b=>b.m)));
-    if(rms<Math.max(0.0012,lis.floor*2)){lis.cand=-1;lis.candN=0;
+    const fresh=spectrumStep();
+    if(rms<Math.max(0.0012,lis.floor*2)){lis.cand=-1;lis.candN=0;lis.fluxHits=[];
       if(lis.heardPc>=0&&performance.now()-lis.heardAt>700){lis.heardPc=-1;setHeard("Listening… play the glowing note.");}
       return;}
+    const t=lisTarget();
+    const want=t?((t.midi%12)+12)%12:-1;
+    // Way 2: the glowing note has just started sounding, even with other notes ringing (both hands)
+    if(t){
+      const hit=fresh&&startedNow(t);
+      lis.fluxHits.push(hit);if(lis.fluxHits.length>3)lis.fluxHits.shift();
+      if(lis.fluxHits.filter(Boolean).length>=2&&!((want===lis.lastPc||lis.needStrike)&&!lis.struck)){matched(want);return;}
+    }
+    // Way 1: one clear pitch, steady for a moment
     const p=detectPitch(lis.buf,lis.an.context.sampleRate);
     if(!p||p.clarity<0.75||p.f<55||p.f>2200){lis.cand=-1;lis.candN=0;return;}
     const midi=Math.round(69+12*Math.log2(p.f/440)), pc=((midi%12)+12)%12;
@@ -1306,14 +1324,50 @@ body.fs-open{overflow:hidden}
     if(lis.candN<3) return;
     if(pc!==lis.heardPc){lis.heardPc=pc;setHeard(`Heard <i style="background:${pcColour(pc)}"></i> ${PC_SHOW[pc]}`);}
     lis.heardAt=performance.now();
-    const t=lisTarget();if(!t) return;
-    const want=((t.midi%12)+12)%12;
-    if(pc!==want){ if(lis.struck&&lis.candN>=6&&pc!==lis.lastPc) lis.struck=false; return; }
-    if((pc===lis.lastPc||lis.needStrike)&&(!lis.struck||lis.candN<5)) return; // same note still ringing: wait for a new press
-    lis.lastPc=pc;lis.struck=false;lis.needStrike=false;lis.matchAt=performance.now();
+    if(!t) return;
+    // (a different steady pitch after a press means that press was for another key, as far as this way goes)
+    if(pc!==want){ if(lis.pStruck&&lis.candN>=6&&pc!==lis.lastPc) lis.pStruck=false; return; }
+    if((pc===lis.lastPc||lis.needStrike)&&(!lis.pStruck||lis.candN<5)) return; // same note still ringing: wait for a new press
+    matched(pc);
+  }
+  function matched(pc){
+    lis.lastPc=pc;lis.struck=false;lis.pStruck=false;lis.needStrike=false;lis.matchAt=performance.now();lis.fluxHits=[];
+    if(pc!==lis.heardPc){lis.heardPc=pc;setHeard(`Heard <i style="background:${pcColour(pc)}"></i> ${PC_SHOW[pc]}`);}
+    lis.heardAt=performance.now();
     lis.heard.add(lis.idx);lis.idx++;
     if(playLocked()&&mel().length&&mel().every((n,i)=>lis.heard.has(i))){unlockPlay();lis.unlocked=true;}
     listenMarks();followTarget();
+  }
+  // What has just started sounding: how much louder each pitch is than a moment (about 1/15 s) ago.
+  function spectrumStep(){
+    const an=lis.an2;if(!an) return false;
+    an.getFloatFrequencyData(lis.db);
+    const n=lis.db.length;let m=lis.ring.length>=5?lis.ring.shift():new Float32Array(n);
+    for(let i=0;i<n;i++)m[i]=Math.pow(10,lis.db[i]/20);
+    lis.ring.push(m);
+    if(lis.ring.length<5) return false;
+    const old=lis.ring[0];for(let i=0;i<n;i++){const d=m[i]-old[i];lis.flux[i]=d>0?d:0;}
+    return true;
+  }
+  // The glowing note counts as played when its own pitch (not just an overtone of another note) has
+  // just got clearly louder: it is among the biggest new sounds, and stands out from the notes either side.
+  function startedNow(t){
+    const binHz=lis.an2.context.sampleRate/lis.an2.fftSize, F=lis.flux;
+    const val=f=>{const b=Math.round(f/binHz);let v=0;for(let i=b-1;i<=b+1;i++)if(i>0&&i<F.length&&F[i]>v)v=F[i];return v;};
+    const lo=Math.round(60/binHz),hi=Math.min(F.length-1,Math.round(4200/binHz));
+    let mx=0,sum=0;for(let i=lo;i<=hi;i++){sum+=F[i];if(F[i]>mx)mx=F[i];}
+    const mean=sum/(hi-lo+1);
+    const midis=[t.midi];if(t.origMidi!==undefined&&t.origMidi!==t.midi)midis.push(t.origMidi);
+    return midis.some(mi=>{
+      const f0=440*Math.pow(2,(mi-69)/12);
+      const F0=val(f0);
+      const subNow=f0/3>50?val(f0/3):0, sh=lis.subHist[mi]||(lis.subHist[mi]=[]);sh.push(subNow);if(sh.length>6)sh.shift();
+      if(F0<0.4*mx||F0<8*mean) return false;
+      if(F0<2*Math.max(val(f0*0.94387),val(f0*1.05946))) return false;
+      // it is the overtone of a lower note just played (judged by that note's strongest moment lately)
+      if(Math.max(...sh)>1.2*F0) return false;
+      return true;
+    });
   }
   $("listen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
   const autoPref=store.get("cps.autoListen");if(autoPref!==null)$("autoListen").checked=!!autoPref;
@@ -1327,7 +1381,7 @@ body.fs-open{overflow:hidden}
     const g=e.target.closest&&e.target.closest(".nt");if(!g) return;
     const i=melody().findIndex(n=>n.els.includes(g));
     if(i<0) return;
-    lis.idx=i;lis.lastPc=-1;lis.struck=true;listenMarks();
+    lis.idx=i;lis.lastPc=-1;lis.struck=true;lis.pStruck=true;listenMarks();
   });
 
   // presets + inputs
