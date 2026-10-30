@@ -243,6 +243,7 @@ body.fs-open{overflow:hidden}
           <button class="btn sm" id="fsClose" type="button">Close full screen</button>
         </div>
         <div class="row sheet-tools">
+          <label class="fs-opt"><input type="checkbox" id="earnPlay" checked> After Play, he plays the tune with Listen before Play works again</label>
           <label class="fs-opt"><input type="checkbox" id="fsShowPlay" checked> Play button in full screen</label>
           <button class="btn sm" id="fsBtn" type="button">Full screen</button>
         </div>
@@ -864,10 +865,11 @@ body.fs-open{overflow:hidden}
   function stop(){
     if(playBus){try{playBus.gain.cancelScheduledValues(0);playBus.gain.setValueAtTime(0,ac.currentTime);playBus.disconnect();}catch(e){}playBus=null;}
     timers.forEach(clearTimeout);timers=[];document.querySelectorAll(".nt.on").forEach(e=>e.classList.remove("on"));playing=false;setPlayLabel("Play");}
-  function setPlayLabel(t){$("play").textContent=t;$("fsPlay").textContent=t;}
+  function setPlayLabel(t){if(t==="Play"&&playLocked())t="Play 🔒";$("play").textContent=t;$("fsPlay").textContent=t;updatePlayUI();}
   $("play").addEventListener("click",()=>{
     if(playing){stop();return;}
-    if(lis.on) return;
+    if(lis.on||playLocked()) return;
+    lockPlay();
     const a=audio();playing=true;setPlayLabel("Stop");
     if(a){playBus=a.createGain();playBus.connect(a.destination);}
     const spb=60/+$("bpm").value;let t0=0.1;
@@ -1139,7 +1141,7 @@ body.fs-open{overflow:hidden}
   // The page listens for the pitch being played. When it is the note that is glowing (any octave),
   // the glow moves on. Other notes are ignored. A note repeated straight after itself needs a new strike.
   var lis={on:false,idx:0,stream:null,src:null,an:null,buf:null,raf:0,cand:-1,candN:0,lastPc:-1,struck:true,
-    hist:[],fb:[],matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
+    hist:[],fb:[],heard:new Set(),unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
   function melody(){
     const out=[];
     (song&&song.systems||[]).forEach(s=>s.rh.ev.forEach(e=>{if(e.n.type==="note"&&e.n.el)out.push(e.n);}));
@@ -1148,6 +1150,7 @@ body.fs-open{overflow:hidden}
   function listenMarks(){
     document.querySelectorAll(".nt.target,.nt.done").forEach(e=>e.classList.remove("target","done"));
     $("sheet").classList.toggle("listening",lis.on);
+    if(!playing)updatePlayUI();
     const old=$("sheet").querySelector(".well-done");if(old)old.remove();
     if(!lis.on) return;
     const mel=melody();
@@ -1155,14 +1158,28 @@ body.fs-open{overflow:hidden}
     mel.forEach((n,i)=>{if(i<lis.idx)n.els.forEach(e=>e.classList.add("done"));});
     if(lis.idx<mel.length){ mel[lis.idx].els.forEach(e=>e.classList.add("target")); }
     else if(mel.length){
-      const p=document.createElement("p");p.className="well-done";p.textContent="Well done! Tap any note to play it again.";$("sheet").appendChild(p);
+      const p=document.createElement("p");p.className="well-done";p.textContent=lis.unlocked?"Well done! Play works again now.":playLocked()?"Well done! Play every note of the tune to make Play work again. Tap a note to start from there.":"Well done! Tap any note to play it again.";$("sheet").appendChild(p);
     }
+  }
+  const mel=()=>melody();
+  // Play earned by playing: once Play is used, it stays locked for that tune until every note
+  // of the tune has been heard through Listen (tapping ahead does not count). Kept in this browser.
+  function tuneKey(){return tuneState.preset||("my:"+$("title").value);}
+  function playLocks(){return store.get("cps.playLocks")||{};}
+  function playLocked(){return $("earnPlay").checked&&!!playLocks()[tuneKey()];}
+  function lockPlay(){if(!$("earnPlay").checked)return;const l=playLocks();l[tuneKey()]=1;store.set("cps.playLocks",l);lis.heard=new Set();lis.unlocked=false;}
+  function unlockPlay(){const l=playLocks();delete l[tuneKey()];store.set("cps.playLocks",l);setPlayLabel(playing?"Stop":"Play");}
+  function updatePlayUI(){
+    const off=lis.on||(playLocked()&&!playing);
+    ["play","fsPlay"].forEach(id=>{$(id).disabled=off;$(id).title=playLocked()&&!playing?"Play the whole tune with Listen to use Play again":"";
+      if(!playing)$(id).textContent=playLocked()?"Play 🔒":"Play";});
+    if(!lis.on)setHeard(playLocked()?"Play the whole tune with Listen, then Play works again.":"");
   }
   function lisTarget(){const mel=melody();return mel[lis.idx]||null;}
   function setHeard(html){$("heard").innerHTML=html;$("fsHeard").innerHTML=html;}
   function setListenLabel(){
     ["listen","fsListen"].forEach(id=>{$(id).textContent=lis.on?"Stop listening":"Listen";$(id).classList.toggle("listen-on",lis.on);});
-    $("play").disabled=lis.on;$("fsPlay").disabled=lis.on;
+    updatePlayUI();
   }
   const PC_SHOW=["C","C♯","D","E♭","E","F","F♯","G","G♯","A","B♭","B"];
   function pcColour(pc){
@@ -1204,7 +1221,7 @@ body.fs-open{overflow:hidden}
     try{lis.src&&lis.src.disconnect();}catch(e){}
     try{lis.stream&&lis.stream.getTracks().forEach(t=>t.stop());}catch(e){}
     lis.stream=lis.src=lis.an=null;
-    setListenLabel();setHeard("");listenMarks();
+    setHeard("");setListenLabel();listenMarks();
   }
   function followTarget(){const t=lisTarget();if(t&&t.el)followNote(t.el);}
   // pitch by normalised autocorrelation (McLeod): returns {f, clarity} or null
@@ -1268,9 +1285,13 @@ body.fs-open{overflow:hidden}
     if(pc!==want){ if(lis.struck&&lis.candN>=6&&pc!==lis.lastPc) lis.struck=false; return; }
     if(pc===lis.lastPc&&(!lis.struck||lis.candN<5)) return; // same note still ringing: wait for a new press
     lis.lastPc=pc;lis.struck=false;lis.hist=[];lis.matchAt=performance.now();
-    lis.idx++;listenMarks();followTarget();
+    lis.heard.add(lis.idx);lis.idx++;
+    if(playLocked()&&mel().length&&mel().every((n,i)=>lis.heard.has(i))){unlockPlay();lis.unlocked=true;}
+    listenMarks();followTarget();
   }
   $("listen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
+  const earnPref=store.get("cps.earnPlay");if(earnPref!==null)$("earnPlay").checked=!!earnPref;
+  $("earnPlay").addEventListener("change",()=>{store.set("cps.earnPlay",$("earnPlay").checked);updatePlayUI();});
   $("fsListen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
   // tap a note to start from there
   $("sheet").addEventListener("click",e=>{
@@ -1287,7 +1308,7 @@ body.fs-open{overflow:hidden}
   function loadPreset(i){
     const p=PRESETS[i];
     tuneState={preset:p.name,shift:0,edited:false};
-    stop();lis.idx=0;$("title").value=p.name;$("notes").value=p.notes;$("lh").value=p.lh||"";$("lyrics").value=p.lyrics;render();
+    stop();lis.idx=0;lis.heard=new Set();$("title").value=p.name;$("notes").value=p.notes;$("lh").value=p.lh||"";$("lyrics").value=p.lyrics;render();
   }
   sel.addEventListener("change",()=>{if(sel.value!=="")loadPreset(+sel.value);});
   const fsTune=$("fsTune");
