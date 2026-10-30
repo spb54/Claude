@@ -204,7 +204,7 @@ body.fs-open{overflow:hidden}
       </div>
       <div class="row"><span class="heard" id="heard" aria-live="polite"></span></div>
       <label class="fs-opt" style="font-weight:400"><input type="checkbox" id="lisDiag"> Show listening details (to help find out why it gets stuck)</label>
-      <p class="hint" style="margin:0">Page version: 30 Oct, evening (listening details, with a Details button in full screen)</p>
+      <p class="hint" style="margin:0">Page version: 30 Oct, late evening (less jumping ahead)</p>
       <details class="help">
         <summary>How Listen works</summary>
         <p class="hint" style="margin:8px 0 0">Tap <b>Listen</b> and allow the microphone when the browser asks. Put the phone, tablet or computer near the piano. The note to play next glows. When the piano plays that note, the glow moves on to the next one. Wrong notes are ignored, so just try again. A note played twice in a row needs two separate presses. Tap any note on the sheet to start from there. Listen follows the tune (the right hand); it is happy with the right letter in any octave.</p>
@@ -1336,7 +1336,7 @@ body.fs-open{overflow:hidden}
       const n=mel[ptrOf(f)];if(!n) continue;
       const want=pcOf(n), hit=fresh&&startedNowCached(n);
       f.fluxHits.push(hit);if(f.fluxHits.length>3)f.fluxHits.shift();
-      if(f.fluxHits.filter(Boolean).length>=2&&!((want===f.lastPc||f.needStrike)&&!f.struck)){if(advance(f,want))return;}
+      if(f.fluxHits.filter(Boolean).length>=2&&!((want===f.lastPc||f.needStrike||ringingCached(n))&&!f.struck)){if(advance(f,want))return;}
     }
     // Way 1: one clear pitch, steady for a moment
     const p=detectPitch(lis.buf,lis.an.context.sampleRate);lis.dp=p;
@@ -1357,7 +1357,7 @@ body.fs-open{overflow:hidden}
         if(f!==lis&&f.count>0&&lis.candN===3&&pc!==f.lastPc&&pc!==pcOf(t)) restartAhead(f);
         continue;
       }
-      if((pc===f.lastPc||f.needStrike)&&(!f.pStruck||lis.candN<5)) continue; // same note still ringing: wait for a new press
+      if((pc===f.lastPc||f.needStrike||ringingCached(n))&&(!f.pStruck||lis.candN<5)) continue; // that note was already sounding: wait for a new press
       if(advance(f,pc)) return;
     }
   }
@@ -1378,6 +1378,25 @@ body.fs-open{overflow:hidden}
     const pr=lis.pressAt?((now-lis.pressAt)/1000).toFixed(1)+" s ago":"none yet";
     const mi=lis.micInfo||{}, yn=v=>v===true?"ON":v===false?"off":"?";
     box.innerHTML=`Level  ${bar} ${lv} dB\nQuiet  ${fl} dB (background)\nPitch  ${pitch}\nWaiting for <b>${want}</b>${needs}\nLast key press heard: ${pr}\nDevice: echo cancel ${yn(mi.echoCancellation)}, noise filter ${yn(mi.noiseSuppression)}, auto volume ${yn(mi.autoGainControl)}`;
+  }
+  // Was this note's pitch already sounding a moment ago (a note still ringing)? Then only a real key
+  // press counts: the slow swell of a ringing string must not pass for the note being played again.
+  function ringingCached(n){
+    const k="r"+n.midi+"/"+n.origMidi;
+    if(!lis.snCache.has(k))lis.snCache.set(k,ringing(n));
+    return lis.snCache.get(k);
+  }
+  function ringing(n){
+    if(!lis.an2||lis.ring.length<5) return false;
+    const binHz=lis.an2.context.sampleRate/lis.an2.fftSize, O=lis.ring[0], M=lis.ring[4];
+    const midis=[n.midi];if(n.origMidi!==undefined&&n.origMidi!==n.midi)midis.push(n.origMidi);
+    return midis.some(mi=>{
+      const b=Math.round(440*Math.pow(2,(mi-69)/12)/binHz);let o=0,m=0;
+      for(let i=b-1;i<=b+1;i++){if(O[i]>o)o=O[i];if(M[i]>m)m=M[i];}
+      const around=[];for(let i=Math.round(b*0.7);i<=Math.round(b*1.42);i++)if(Math.abs(i-b)>2&&i>0&&i<O.length)around.push(O[i]);
+      around.sort((x,y)=>x-y);
+      return o>0.35*m&&o>4*(around[around.length>>1]||0);
+    });
   }
   function startedNowCached(n){
     const k=n.midi+"/"+n.origMidi;
@@ -1440,6 +1459,11 @@ body.fs-open{overflow:hidden}
       const around=[];for(let i=Math.round(b*0.7);i<=Math.round(b*1.42);i++)if(Math.abs(i-b)>2&&i>0&&i<M.length)around.push(M[i]);
       around.sort((x,y)=>x-y);
       if(around.length&&now<8*around[around.length>>1]) return false;
+      // a new note makes the sound around its pitch louder overall; a key being let go (the damper
+      // stopping a neighbouring string) makes it quieter, and must not pass for a new note
+      const O=lis.ring[0];let eNow=0,eOld=0;
+      for(let i=Math.round(b*0.89);i<=Math.round(b*1.123);i++){eNow+=M[i]*M[i];eOld+=O[i]*O[i];} // two semitones either side
+      if(eNow<1.1*eOld) return false;
       const subNow=f0/3>50?val(f0/3):0, sh=lis.subHist[mi]||(lis.subHist[mi]=[]);sh.push(subNow);if(sh.length>6)sh.shift();
       if(F0<0.4*mx||F0<8*mean) return false;
       if(F0<2*Math.max(val(f0*0.94387),val(f0*1.05946))) return false;
