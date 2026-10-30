@@ -122,6 +122,9 @@ body.fs-open{overflow:hidden}
 .heard{display:inline-flex;align-items:center;gap:6px;font:600 .95rem var(--round);color:var(--muted);min-height:1.6em}
 .heard i{display:inline-block;width:1.1em;height:1.1em;border-radius:50%;border:1px solid rgba(0,0,0,.25);background:transparent}
 .sheet-wrap.fs .heard{color:#6F6A60;align-self:center}
+.diag{position:fixed;left:8px;bottom:8px;z-index:60;max-width:min(360px,calc(100vw - 16px));background:rgba(20,24,34,.88);color:#fff;
+  font:12px/1.45 var(--mono);padding:8px 10px;border-radius:8px;pointer-events:none;white-space:pre-wrap}
+.diag b{color:#FFD54F;font-weight:700}
 .well-done{font:700 1.4rem var(--round);color:#2E7D32;text-align:center;margin:14px 0 0}
 @media (prefers-reduced-motion:reduce){.nt{transition:none}.nt.on{transform:none;filter:brightness(1.15)}.nt.target{animation:none;transform:scale(1.25)}}
 </style>
@@ -199,6 +202,7 @@ body.fs-open{overflow:hidden}
         <label class="bpm">Speed <input type="range" id="bpm" min="50" max="160" value="96"> <output id="bpmOut">96</output></label>
       </div>
       <div class="row"><span class="heard" id="heard" aria-live="polite"></span></div>
+      <label class="fs-opt" style="font-weight:400"><input type="checkbox" id="lisDiag"> Show listening details (to help find out why it gets stuck)</label>
       <details class="help">
         <summary>How Listen works</summary>
         <p class="hint" style="margin:8px 0 0">Tap <b>Listen</b> and allow the microphone when the browser asks. Put the phone, tablet or computer near the piano. The note to play next glows. When the piano plays that note, the glow moves on to the next one. Wrong notes are ignored, so just try again. A note played twice in a row needs two separate presses. Tap any note on the sheet to start from there. Listen follows the tune (the right hand); it is happy with the right letter in any octave.</p>
@@ -1216,6 +1220,7 @@ body.fs-open{overflow:hidden}
     }
     if(a.state==="suspended"){try{await a.resume();}catch(e){}}
     lis.stream=stream;lis.src=a.createMediaStreamSource(stream);
+    try{const st=stream.getAudioTracks()[0].getSettings();lis.micInfo=st;}catch(e){lis.micInfo={};}
     lis.an=a.createAnalyser();lis.an.fftSize=2048;lis.an.smoothingTimeConstant=0;
     lis.src.connect(lis.an); // not connected to the speakers, so no feedback
     lis.an2=a.createAnalyser();lis.an2.fftSize=8192;lis.an2.smoothingTimeConstant=0;lis.src.connect(lis.an2);
@@ -1237,7 +1242,7 @@ body.fs-open{overflow:hidden}
     try{lis.src&&lis.src.disconnect();}catch(e){}
     try{lis.stream&&lis.stream.getTracks().forEach(t=>t.stop());}catch(e){}
     lis.stream=lis.src=lis.an=lis.an2=null;
-    setHeard("");setListenLabel();listenMarks();
+    setHeard("");setListenLabel();listenMarks();showDiag();
   }
   function followTarget(){const t=lisTarget();if(t&&t.el)followNote(t.el);}
   // pitch by normalised autocorrelation (McLeod): returns {f, clarity} or null
@@ -1296,20 +1301,24 @@ body.fs-open{overflow:hidden}
   function listenTick(){
     if(!lis.on) return;
     lis.raf=requestAnimationFrame(listenTick);
+    lis.dp=null;tickCore();showDiag();
+  }
+  function tickCore(){
     lis.an.getFloatTimeDomainData(lis.buf);
     let s=0;for(let i=0;i<lis.buf.length;i++)s+=lis.buf[i]*lis.buf[i];
     const rms=Math.sqrt(s/lis.buf.length);
     // A key press resets the pitch check, so the new note has to settle before it counts
     // (a note still ringing is not credited with the next key's press).
     const now=performance.now();
-    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.struck=true;lis.pStruck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;lis.fluxHits=[];
+    lis.drms=rms;
+    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.pressAt=now;lis.struck=true;lis.pStruck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;lis.fluxHits=[];
       (lis.ahead||[]).forEach(f=>{f.struck=true;f.pStruck=true;f.fluxHits=[];});}
     // background noise: the quietest moment of the last 8 seconds
     const fb=lis.fb, cur=fb[fb.length-1];
     if(!cur||now-cur.t>500){fb.push({t:now,m:rms});if(fb.length>16)fb.shift();}else if(rms<cur.m)cur.m=rms;
-    lis.floor=Math.max(0.0003,Math.min(...fb.map(b=>b.m)));
+    lis.floor=Math.max(0.00001,Math.min(...fb.map(b=>b.m)));
     const fresh=spectrumStep();
-    if(rms<Math.max(0.0012,lis.floor*2)){lis.cand=-1;lis.candN=0;lis.fluxHits=[];
+    if(rms<Math.max(0.00004,lis.floor*2)){lis.cand=-1;lis.candN=0;lis.fluxHits=[];
       if(lis.heardPc>=0&&performance.now()-lis.heardAt>700){lis.heardPc=-1;setHeard("Listening… play the glowing note.");}
       return;}
     const mel=melody(), t=mel[lis.idx]||null;
@@ -1327,7 +1336,7 @@ body.fs-open{overflow:hidden}
       if(f.fluxHits.filter(Boolean).length>=2&&!((want===f.lastPc||f.needStrike)&&!f.struck)){if(advance(f,want))return;}
     }
     // Way 1: one clear pitch, steady for a moment
-    const p=detectPitch(lis.buf,lis.an.context.sampleRate);
+    const p=detectPitch(lis.buf,lis.an.context.sampleRate);lis.dp=p;
     if(!p||p.clarity<0.75||p.f<55||p.f>2200){lis.cand=-1;lis.candN=0;return;}
     const midi=Math.round(69+12*Math.log2(p.f/440)), pc=((midi%12)+12)%12;
     if(pc===lis.cand)lis.candN++;else{lis.cand=pc;lis.candN=1;}
@@ -1348,6 +1357,24 @@ body.fs-open{overflow:hidden}
       if((pc===f.lastPc||f.needStrike)&&(!f.pStruck||lis.candN<5)) continue; // same note still ringing: wait for a new press
       if(advance(f,pc)) return;
     }
+  }
+  // Listening details: what the page is hearing, for finding out why it gets stuck
+  function showDiag(){
+    const on=$("lisDiag").checked&&lis.on;let box=$("diag");
+    if(!on){if(box)box.hidden=true;return;}
+    const now=performance.now();if(now-(lis.diagAt||0)<120)return;lis.diagAt=now;
+    if(!box){box=document.createElement("div");box.id="diag";box.className="diag";box.setAttribute("aria-hidden","true");$("sheetWrap").appendChild(box);}
+    box.hidden=false;
+    const dB=v=>v>0?Math.round(20*Math.log10(v)):-99, lv=dB(lis.drms||0), fl=dB(lis.floor||0);
+    const bar="█".repeat(Math.max(0,Math.min(20,Math.round((lv+80)/4))))+"░".repeat(Math.max(0,20-Math.max(0,Math.min(20,Math.round((lv+80)/4)))));
+    const p=lis.dp;let pitch="none";
+    if(p&&p.f>55&&p.f<2200){const m=69+12*Math.log2(p.f/440),pc=((Math.round(m)%12)+12)%12,c=Math.round((m-Math.round(m))*100);pitch=`${PC_SHOW[pc]} ${c>=0?"+":""}${c} cents, clear ${p.clarity.toFixed(2)}${p.clarity<0.75?" (too unclear)":""}`;}
+    const t=melody()[lis.idx];
+    const want=t?PC_SHOW[((t.midi%12)+12)%12]:"(end)";
+    const needs=t&&((((t.midi%12)+12)%12)===lis.lastPc||lis.needStrike)?" — needs a new key press":"";
+    const pr=lis.pressAt?((now-lis.pressAt)/1000).toFixed(1)+" s ago":"none yet";
+    const mi=lis.micInfo||{}, yn=v=>v===true?"ON":v===false?"off":"?";
+    box.innerHTML=`Level  ${bar} ${lv} dB\nQuiet  ${fl} dB (background)\nPitch  ${pitch}\nWaiting for <b>${want}</b>${needs}\nLast key press heard: ${pr}\nDevice: echo cancel ${yn(mi.echoCancellation)}, noise filter ${yn(mi.noiseSuppression)}, auto volume ${yn(mi.autoGainControl)}`;
   }
   function startedNowCached(n){
     const k=n.midi+"/"+n.origMidi;
@@ -1404,6 +1431,12 @@ body.fs-open{overflow:hidden}
     return midis.some(mi=>{
       const f0=440*Math.pow(2,(mi-69)/12);
       const F0=val(f0);
+      // the note must stand well clear of the sound at the pitches around it (not a flicker in the hiss)
+      const b=Math.round(f0/binHz), M=lis.ring[4];let now=0;
+      for(let i=b-1;i<=b+1;i++)if(M[i]>now)now=M[i];
+      const around=[];for(let i=Math.round(b*0.7);i<=Math.round(b*1.42);i++)if(Math.abs(i-b)>2&&i>0&&i<M.length)around.push(M[i]);
+      around.sort((x,y)=>x-y);
+      if(around.length&&now<8*around[around.length>>1]) return false;
       const subNow=f0/3>50?val(f0/3):0, sh=lis.subHist[mi]||(lis.subHist[mi]=[]);sh.push(subNow);if(sh.length>6)sh.shift();
       if(F0<0.4*mx||F0<8*mean) return false;
       if(F0<2*Math.max(val(f0*0.94387),val(f0*1.05946))) return false;
@@ -1413,6 +1446,8 @@ body.fs-open{overflow:hidden}
     });
   }
   $("listen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
+  const diagPref=store.get("cps.lisDiag");if(diagPref!==null)$("lisDiag").checked=!!diagPref;
+  $("lisDiag").addEventListener("change",()=>{store.set("cps.lisDiag",$("lisDiag").checked);showDiag();});
   const autoPref=store.get("cps.autoListen");if(autoPref!==null)$("autoListen").checked=!!autoPref;
   $("autoListen").addEventListener("change",()=>store.set("cps.autoListen",$("autoListen").checked));
   const earnPref=store.get("cps.earnPlay");if(earnPref!==null)$("earnPlay").checked=!!earnPref;
