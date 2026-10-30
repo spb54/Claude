@@ -1164,6 +1164,7 @@ body.fs-open{overflow:hidden}
     if(!lis.on) return;
     const mel=melody();
     if(lis.idx>mel.length) lis.idx=mel.length;
+    if(!lis.ahead||!lis.ahead.length||lis.ahead[0].start!==lis.idx+1)resetAhead();
     mel.forEach((n,i)=>{if(i<lis.idx)n.els.forEach(e=>e.classList.add("done"));});
     if(lis.idx<mel.length){ mel[lis.idx].els.forEach(e=>e.classList.add("target")); }
     else if(mel.length){
@@ -1223,7 +1224,9 @@ body.fs-open{overflow:hidden}
     lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.pStruck=true;lis.heardPc=-1;lis.fb=[];lis.fbH=[];lis.fbB=[];lis.lastTick=performance.now();
     // straight after Play the speaker is still ringing, so the first note needs a fresh key press
     lis.needStrike=!!afterPlay;if(afterPlay){lis.struck=false;lis.pStruck=false;lis.matchAt=performance.now();}
+    lis.fluxHits=[];lis.snCache=new Map();
     if(lis.idx>=melody().length) lis.idx=0;
+    resetAhead();
     setListenLabel();setHeard("Listening… play the glowing note.");
     listenMarks();followTarget();
     lis.raf=requestAnimationFrame(listenTick);
@@ -1299,7 +1302,8 @@ body.fs-open{overflow:hidden}
     // A key press resets the pitch check, so the new note has to settle before it counts
     // (a note still ringing is not credited with the next key's press).
     const now=performance.now();
-    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.struck=true;lis.pStruck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;lis.fluxHits=[];}
+    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.struck=true;lis.pStruck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;lis.fluxHits=[];
+      (lis.ahead||[]).forEach(f=>{f.struck=true;f.pStruck=true;f.fluxHits=[];});}
     // background noise: the quietest moment of the last 8 seconds
     const fb=lis.fb, cur=fb[fb.length-1];
     if(!cur||now-cur.t>500){fb.push({t:now,m:rms});if(fb.length>16)fb.shift();}else if(rms<cur.m)cur.m=rms;
@@ -1308,13 +1312,19 @@ body.fs-open{overflow:hidden}
     if(rms<Math.max(0.0012,lis.floor*2)){lis.cand=-1;lis.candN=0;lis.fluxHits=[];
       if(lis.heardPc>=0&&performance.now()-lis.heardAt>700){lis.heardPc=-1;setHeard("Listening… play the glowing note.");}
       return;}
-    const t=lisTarget();
-    const want=t?((t.midi%12)+12)%12:-1;
-    // Way 2: the glowing note has just started sounding, even with other notes ringing (both hands)
-    if(t){
-      const hit=fresh&&startedNow(t);
-      lis.fluxHits.push(hit);if(lis.fluxHits.length>3)lis.fluxHits.shift();
-      if(lis.fluxHits.filter(Boolean).length>=2&&!((want===lis.lastPc||lis.needStrike)&&!lis.struck)){matched(want);return;}
+    const mel=melody(), t=mel[lis.idx]||null;
+    // Followers: the glowing note itself (lis), and a look-ahead from each of the next two notes. If a
+    // look-ahead hears the following notes played in order, the tune moves on past the note it missed.
+    (lis.ahead||[]).forEach(f=>{if(f.count>0&&now-f.at>3000)restartAhead(f);});
+    const fol=(lis.ahead||[]).slice().reverse().concat([lis]); // furthest look-ahead first, so a finished run wins
+    const ptrOf=f=>f===lis?lis.idx:f.ptr, pcOf=n=>((n.midi%12)+12)%12;
+    lis.snCache=new Map();
+    // Way 2: the note has just started sounding, even with other notes ringing (both hands)
+    for(const f of fol){
+      const n=mel[ptrOf(f)];if(!n) continue;
+      const want=pcOf(n), hit=fresh&&startedNowCached(n);
+      f.fluxHits.push(hit);if(f.fluxHits.length>3)f.fluxHits.shift();
+      if(f.fluxHits.filter(Boolean).length>=2&&!((want===f.lastPc||f.needStrike)&&!f.struck)){if(advance(f,want))return;}
     }
     // Way 1: one clear pitch, steady for a moment
     const p=detectPitch(lis.buf,lis.an.context.sampleRate);
@@ -1325,16 +1335,49 @@ body.fs-open{overflow:hidden}
     if(pc!==lis.heardPc){lis.heardPc=pc;setHeard(`Heard <i style="background:${pcColour(pc)}"></i> ${PC_SHOW[pc]}`);}
     lis.heardAt=performance.now();
     if(!t) return;
-    // (a different steady pitch after a press means that press was for another key, as far as this way goes)
-    if(pc!==want){ if(lis.pStruck&&lis.candN>=6&&pc!==lis.lastPc) lis.pStruck=false; return; }
-    if((pc===lis.lastPc||lis.needStrike)&&(!lis.pStruck||lis.candN<5)) return; // same note still ringing: wait for a new press
-    matched(pc);
+    for(const f of fol){
+      const n=mel[ptrOf(f)];if(!n) continue;
+      const want=pcOf(n);
+      if(pc!==want){
+        // a different steady pitch after a press means that press was for another key, as far as this way goes
+        if(f.pStruck&&lis.candN>=6&&pc!==f.lastPc) f.pStruck=false;
+        // a clearly different note breaks a look-ahead run (wrong notes do not add up to a skip)
+        if(f!==lis&&f.count>0&&lis.candN===3&&pc!==f.lastPc&&pc!==pcOf(t)) restartAhead(f);
+        continue;
+      }
+      if((pc===f.lastPc||f.needStrike)&&(!f.pStruck||lis.candN<5)) continue; // same note still ringing: wait for a new press
+      if(advance(f,pc)) return;
+    }
+  }
+  function startedNowCached(n){
+    const k=n.midi+"/"+n.origMidi;
+    if(!lis.snCache.has(k))lis.snCache.set(k,startedNow(n));
+    return lis.snCache.get(k);
+  }
+  // Look-ahead runs: from the note after the glowing one, two notes in a row move the tune on;
+  // from two notes after, three in a row are needed.
+  function resetAhead(){
+    const n=melody().length;lis.ahead=[];
+    for(let off=1;off<=2;off++){const p=lis.idx+off;if(p<n)lis.ahead.push(restartAhead({start:p,need:off+1}));}
+  }
+  function restartAhead(f){
+    f.ptr=f.start;f.count=0;f.at=0;f.lastPc=lis.lastPc;f.struck=false;f.pStruck=false;f.needStrike=!!lis.needStrike;f.fluxHits=[];
+    return f;
+  }
+  function advance(f,pc){
+    if(f===lis){matched(pc);return true;}
+    f.lastPc=pc;f.struck=false;f.pStruck=false;f.needStrike=false;f.fluxHits=[];f.ptr++;f.count++;f.at=performance.now();
+    if(f.count<f.need) return false;
+    // he has played on correctly: the notes skipped over count as played
+    for(let i=lis.idx;i<f.ptr-1;i++)lis.heard.add(i);
+    lis.idx=f.ptr-1;matched(pc);
+    return true;
   }
   function matched(pc){
     lis.lastPc=pc;lis.struck=false;lis.pStruck=false;lis.needStrike=false;lis.matchAt=performance.now();lis.fluxHits=[];
     if(pc!==lis.heardPc){lis.heardPc=pc;setHeard(`Heard <i style="background:${pcColour(pc)}"></i> ${PC_SHOW[pc]}`);}
     lis.heardAt=performance.now();
-    lis.heard.add(lis.idx);lis.idx++;
+    lis.heard.add(lis.idx);lis.idx++;resetAhead();
     if(playLocked()&&mel().length&&mel().every((n,i)=>lis.heard.has(i))){unlockPlay();lis.unlocked=true;}
     listenMarks();followTarget();
   }
@@ -1381,7 +1424,7 @@ body.fs-open{overflow:hidden}
     const g=e.target.closest&&e.target.closest(".nt");if(!g) return;
     const i=melody().findIndex(n=>n.els.includes(g));
     if(i<0) return;
-    lis.idx=i;lis.lastPc=-1;lis.struck=true;lis.pStruck=true;listenMarks();
+    lis.idx=i;lis.lastPc=-1;lis.struck=true;lis.pStruck=true;lis.needStrike=false;resetAhead();listenMarks();
   });
 
   // presets + inputs
