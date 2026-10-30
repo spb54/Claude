@@ -119,6 +119,7 @@ body.fs-open{overflow:hidden}
 .listening .nt{cursor:pointer}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.listen-on{background:#C62828;border-color:#C62828;color:#FFFFFF}
+.sheet-wrap.fs .fs-bar .btn.listen-on{background:#C62828;border-color:#C62828;color:#FFFFFF}
 .heard{display:inline-flex;align-items:center;gap:6px;font:600 .95rem var(--round);color:var(--muted);min-height:1.6em}
 .heard i{display:inline-block;width:1.1em;height:1.1em;border-radius:50%;border:1px solid rgba(0,0,0,.25);background:transparent}
 .sheet-wrap.fs .heard{color:#6F6A60;align-self:center}
@@ -203,7 +204,7 @@ body.fs-open{overflow:hidden}
       </div>
       <div class="row"><span class="heard" id="heard" aria-live="polite"></span></div>
       <label class="fs-opt" style="font-weight:400"><input type="checkbox" id="lisDiag"> Show listening details (to help find out why it gets stuck)</label>
-      <p class="hint" style="margin:0">Page version: 30 Oct, evening (listening details)</p>
+      <p class="hint" style="margin:0">Page version: 30 Oct, evening (listening details, with a Details button in full screen)</p>
       <details class="help">
         <summary>How Listen works</summary>
         <p class="hint" style="margin:8px 0 0">Tap <b>Listen</b> and allow the microphone when the browser asks. Put the phone, tablet or computer near the piano. The note to play next glows. When the piano plays that note, the glow moves on to the next one. Wrong notes are ignored, so just try again. A note played twice in a row needs two separate presses. Tap any note on the sheet to start from there. Listen follows the tune (the right hand); it is happy with the right letter in any octave.</p>
@@ -239,6 +240,7 @@ body.fs-open{overflow:hidden}
           <select class="fs-tune" id="fsTune" aria-label="Choose a tune"></select>
           <button class="btn primary sm" id="fsPlay" type="button">Play</button>
           <button class="btn sm" id="fsListen" type="button">Listen</button>
+          <button class="btn sm" id="fsDiag" type="button" aria-pressed="false" title="Show what the page is hearing">Details</button>
           <span class="heard" id="fsHeard" aria-live="polite"></span>
           <span class="fs-key" id="fsKey" aria-live="polite"></span>
           <button class="btn sm" id="fsKeyDown" type="button" aria-label="Move the tune down one key">Key ↓</button>
@@ -1448,7 +1450,10 @@ body.fs-open{overflow:hidden}
   }
   $("listen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
   const diagPref=store.get("cps.lisDiag");if(diagPref!==null)$("lisDiag").checked=!!diagPref;
-  $("lisDiag").addEventListener("change",()=>{store.set("cps.lisDiag",$("lisDiag").checked);showDiag();});
+  const syncDiag=()=>{store.set("cps.lisDiag",$("lisDiag").checked);$("fsDiag").setAttribute("aria-pressed",String($("lisDiag").checked));$("fsDiag").classList.toggle("listen-on",$("lisDiag").checked);showDiag();};
+  $("lisDiag").addEventListener("change",syncDiag);
+  $("fsDiag").addEventListener("click",()=>{$("lisDiag").checked=!$("lisDiag").checked;syncDiag();});
+  $("fsDiag").setAttribute("aria-pressed",String($("lisDiag").checked));$("fsDiag").classList.toggle("listen-on",$("lisDiag").checked);
   const autoPref=store.get("cps.autoListen");if(autoPref!==null)$("autoListen").checked=!!autoPref;
   $("autoListen").addEventListener("change",()=>store.set("cps.autoListen",$("autoListen").checked));
   const earnPref=store.get("cps.earnPlay");if(earnPref!==null)$("earnPlay").checked=!!earnPref;
