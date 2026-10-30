@@ -1139,7 +1139,7 @@ body.fs-open{overflow:hidden}
   // The page listens for the pitch being played. When it is the note that is glowing (any octave),
   // the glow moves on. Other notes are ignored. A note repeated straight after itself needs a new strike.
   var lis={on:false,idx:0,stream:null,src:null,an:null,buf:null,raf:0,cand:-1,candN:0,lastPc:-1,struck:true,
-    rms:[],floor:0.002,heardPc:-1,heardAt:0,finished:false};
+    hist:[],matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
   function melody(){
     const out=[];
     (song&&song.systems||[]).forEach(s=>s.rh.ev.forEach(e=>{if(e.n.type==="note"&&e.n.el)out.push(e.n);}));
@@ -1192,7 +1192,7 @@ body.fs-open{overflow:hidden}
     lis.an=a.createAnalyser();lis.an.fftSize=2048;lis.an.smoothingTimeConstant=0;
     lis.src.connect(lis.an); // not connected to the speakers, so no feedback
     lis.buf=new Float32Array(lis.an.fftSize);
-    lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.rms=[];lis.heardPc=-1;
+    lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.heardPc=-1;
     if(lis.idx>=melody().length) lis.idx=0;
     setListenLabel();setHeard("Listening… play the glowing note.");
     listenMarks();followTarget();
@@ -1240,10 +1240,15 @@ body.fs-open{overflow:hidden}
     lis.an.getFloatTimeDomainData(lis.buf);
     let s=0;for(let i=0;i<lis.buf.length;i++)s+=lis.buf[i]*lis.buf[i];
     const rms=Math.sqrt(s/lis.buf.length);
-    // a fresh strike: the sound gets clearly louder than it was a moment ago
-    const h=lis.rms;h.push(rms);if(h.length>10)h.shift();
-    const recentMin=Math.min(...h.slice(0,-1));
-    if(h.length>3&&rms>recentMin*1.45&&rms>lis.floor*4) lis.struck=true;
+    // A fresh strike, for a note repeated straight after itself: the sound suddenly jumps to about
+    // a third louder than it was a moment ago. Nothing counts for a moment after a match,
+    // while that note is still getting louder.
+    const now=performance.now();
+    if(!lis.struck&&now-lis.matchAt>100){
+      const h=lis.hist;h.push([now,rms]);while(h.length&&now-h[0][0]>120)h.shift();
+      let lo=Infinity;for(let i=0;i<h.length-1;i++)if(h[i][1]<lo)lo=h[i][1];
+      if(h.length>2&&rms>lo*1.35&&rms>Math.max(0.006,lis.floor*4)){lis.struck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;} // the pitch must settle again after the press
+    }
     lis.floor=Math.min(Math.max(lis.floor*0.999+rms*0.001,0.0005),rms<lis.floor?rms*0.5+lis.floor*0.5:lis.floor*1.002);
     if(rms<Math.max(0.006,lis.floor*3)){lis.cand=-1;lis.candN=0;
       if(lis.heardPc>=0&&performance.now()-lis.heardAt>700){lis.heardPc=-1;setHeard("Listening… play the glowing note.");}
@@ -1257,9 +1262,9 @@ body.fs-open{overflow:hidden}
     lis.heardAt=performance.now();
     const t=lisTarget();if(!t) return;
     const want=((t.midi%12)+12)%12;
-    if(pc!==want) return;
-    if(pc===lis.lastPc&&!lis.struck) return; // same note still ringing: wait for a new press
-    lis.lastPc=pc;lis.struck=false;
+    if(pc!==want){ if(lis.struck&&lis.candN>=3&&pc!==lis.lastPc) lis.struck=false; return; }
+    if(pc===lis.lastPc&&(!lis.struck||lis.candN<5)) return; // same note still ringing: wait for a new press
+    lis.lastPc=pc;lis.struck=false;lis.hist=[];lis.matchAt=performance.now();
     lis.idx++;listenMarks();followTarget();
   }
   $("listen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
