@@ -1144,7 +1144,7 @@ body.fs-open{overflow:hidden}
   // The page listens for the pitch being played. When it is the note that is glowing (any octave),
   // the glow moves on. Other notes are ignored. A note repeated straight after itself needs a new strike.
   var lis={on:false,idx:0,stream:null,src:null,an:null,buf:null,raf:0,cand:-1,candN:0,lastPc:-1,struck:true,
-    hist:[],fb:[],heard:new Set(),needStrike:false,unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
+    fb:[],fbH:[],fbB:[],hfE:null,bbE:null,lastTick:0,heard:new Set(),needStrike:false,unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
   function melody(){
     const out=[];
     (song&&song.systems||[]).forEach(s=>s.rh.ev.forEach(e=>{if(e.n.type==="note"&&e.n.el)out.push(e.n);}));
@@ -1212,9 +1212,9 @@ body.fs-open{overflow:hidden}
     lis.an=a.createAnalyser();lis.an.fftSize=2048;lis.an.smoothingTimeConstant=0;
     lis.src.connect(lis.an); // not connected to the speakers, so no feedback
     lis.buf=new Float32Array(lis.an.fftSize);
-    lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.heardPc=-1;lis.fb=[];
+    lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.heardPc=-1;lis.fb=[];lis.fbH=[];lis.fbB=[];lis.lastTick=performance.now();
     // straight after Play the speaker is still ringing, so the first note needs a fresh key press
-    lis.needStrike=!!afterPlay;if(afterPlay){lis.struck=false;lis.hist=[];lis.matchAt=performance.now();}
+    lis.needStrike=!!afterPlay;if(afterPlay){lis.struck=false;lis.matchAt=performance.now();}
     if(lis.idx>=melody().length) lis.idx=0;
     setListenLabel();setHeard("Listening… play the glowing note.");
     listenMarks();followTarget();
@@ -1256,21 +1256,42 @@ body.fs-open{overflow:hidden}
     const shift=den?0.5*(a-c)/den:0;
     return {f:sr/(pick+shift),clarity:b};
   }
+  // A key press: the hammer makes a sharp click, so the high part of the sound jumps several times
+  // louder within a few thousandths of a second. As a backup (for a click lost in background hiss)
+  // the whole sound jumping sharply also counts. A ringing note's slow pulsing never does either,
+  // so a held note is never mistaken for a repeat, while quick repeated notes are still caught.
+  function jumpIn(buf,e,fb,hf,ratio,now,newB){
+    const B=128,nb=e.length;
+    for(let k=0;k<nb;k++){let s=0;for(let i=k*B+(k?0:1);i<(k+1)*B;i++){const d=hf?buf[i]-buf[i-1]:buf[i];s+=d*d;}e[k]=s/B;}
+    let mn=Infinity;for(let k=0;k<nb;k++)if(e[k]<mn)mn=e[k];
+    const cur=fb[fb.length-1];
+    if(!cur||now-cur.t>500){fb.push({t:now,m:mn});if(fb.length>16)fb.shift();}else if(mn<cur.m)cur.m=mn;
+    let floor=Infinity;fb.forEach(b=>{if(b.m<floor)floor=b.m;});floor=Math.max(floor,1e-10);
+    for(let k=nb-newB;k<nb;k++){
+      const pre=(e[k-8]+e[k-7]+e[k-6]+e[k-5]+e[k-4])/5;
+      if(e[k]>floor*3&&e[k]>ratio*Math.max(pre,floor)) return true;
+    }
+    return false;
+  }
+  function strikeIn(buf,now){
+    const nb=buf.length/128;
+    if(!lis.hfE||lis.hfE.length!==nb){lis.hfE=new Float32Array(nb);lis.bbE=new Float32Array(nb);}
+    // only look at the part of the sound that is new since the last look
+    const sr=lis.an.context.sampleRate, newB=Math.min(nb-8,Math.ceil((now-lis.lastTick)*sr/1000/128)+1);lis.lastTick=now;
+    const click=jumpIn(buf,lis.hfE,lis.fbH,true,2.5,now,newB);
+    const loud=jumpIn(buf,lis.bbE,lis.fbB,false,3.5,now,newB);
+    return click||loud;
+  }
   function listenTick(){
     if(!lis.on) return;
     lis.raf=requestAnimationFrame(listenTick);
     lis.an.getFloatTimeDomainData(lis.buf);
     let s=0;for(let i=0;i<lis.buf.length;i++)s+=lis.buf[i]*lis.buf[i];
     const rms=Math.sqrt(s/lis.buf.length);
-    // A fresh strike, for a note repeated straight after itself: the sound suddenly jumps to about
-    // a third louder than it was a moment ago. Nothing counts for a moment after a match,
-    // while that note is still getting louder.
+    // A key press resets the pitch check, so the new note has to settle before it counts
+    // (a note still ringing is not credited with the next key's press).
     const now=performance.now();
-    if(!lis.struck&&now-lis.matchAt>100){
-      const h=lis.hist;h.push([now,rms]);while(h.length&&now-h[0][0]>120)h.shift();
-      let lo=Infinity;for(let i=0;i<h.length-1;i++)if(h[i][1]<lo)lo=h[i][1];
-      if(h.length>2&&rms>lo*1.35&&rms>Math.max(0.0015,lis.floor*3)){lis.struck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;} // the pitch must settle again after the press
-    }
+    if(strikeIn(lis.buf,now)&&now-lis.matchAt>40){lis.struck=true;lis.strikeAt=now;lis.cand=-1;lis.candN=0;}
     // background noise: the quietest moment of the last 8 seconds
     const fb=lis.fb, cur=fb[fb.length-1];
     if(!cur||now-cur.t>500){fb.push({t:now,m:rms});if(fb.length>16)fb.shift();}else if(rms<cur.m)cur.m=rms;
@@ -1289,7 +1310,7 @@ body.fs-open{overflow:hidden}
     const want=((t.midi%12)+12)%12;
     if(pc!==want){ if(lis.struck&&lis.candN>=6&&pc!==lis.lastPc) lis.struck=false; return; }
     if((pc===lis.lastPc||lis.needStrike)&&(!lis.struck||lis.candN<5)) return; // same note still ringing: wait for a new press
-    lis.lastPc=pc;lis.struck=false;lis.needStrike=false;lis.hist=[];lis.matchAt=performance.now();
+    lis.lastPc=pc;lis.struck=false;lis.needStrike=false;lis.matchAt=performance.now();
     lis.heard.add(lis.idx);lis.idx++;
     if(playLocked()&&mel().length&&mel().every((n,i)=>lis.heard.has(i))){unlockPlay();lis.unlocked=true;}
     listenMarks();followTarget();
