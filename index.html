@@ -243,6 +243,7 @@ body.fs-open{overflow:hidden}
           <button class="btn sm" id="fsClose" type="button">Close full screen</button>
         </div>
         <div class="row sheet-tools">
+          <label class="fs-opt"><input type="checkbox" id="autoListen" checked> Start listening when Play finishes</label>
           <label class="fs-opt"><input type="checkbox" id="earnPlay" checked> After Play, he plays the tune with Listen before Play works again</label>
           <label class="fs-opt"><input type="checkbox" id="fsShowPlay" checked> Play button in full screen</label>
           <button class="btn sm" id="fsBtn" type="button">Full screen</button>
@@ -868,7 +869,8 @@ body.fs-open{overflow:hidden}
   function setPlayLabel(t){if(t==="Play"&&playLocked())t="Play 🔒";$("play").textContent=t;$("fsPlay").textContent=t;updatePlayUI();}
   $("play").addEventListener("click",()=>{
     if(playing){stop();return;}
-    if(lis.on||playLocked()) return;
+    if(playLocked()) return;
+    if(lis.on) stopListen(); // Play stops listening first, so the microphone does not hear it
     lockPlay();
     const a=audio();playing=true;setPlayLabel("Stop");
     if(a){playBus=a.createGain();playBus.connect(a.destination);}
@@ -883,7 +885,8 @@ body.fs-open{overflow:hidden}
       });
       t0+=sys.realLen*spb;
     });
-    timers.push(setTimeout(stop,t0*1000+200));
+    // when the tune has played to the end, start listening from the first note (Play never restarts by itself)
+    timers.push(setTimeout(()=>{stop();if($("autoListen").checked){lis.idx=0;startListen(true);}},t0*1000+200));
   });
   $("bpm").addEventListener("input",e=>$("bpmOut").textContent=e.target.value);
 
@@ -1141,7 +1144,7 @@ body.fs-open{overflow:hidden}
   // The page listens for the pitch being played. When it is the note that is glowing (any octave),
   // the glow moves on. Other notes are ignored. A note repeated straight after itself needs a new strike.
   var lis={on:false,idx:0,stream:null,src:null,an:null,buf:null,raf:0,cand:-1,candN:0,lastPc:-1,struck:true,
-    hist:[],fb:[],heard:new Set(),unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
+    hist:[],fb:[],heard:new Set(),needStrike:false,unlocked:false,matchAt:0,strikeAt:0,floor:0.002,heardPc:-1,heardAt:0,finished:false};
   function melody(){
     const out=[];
     (song&&song.systems||[]).forEach(s=>s.rh.ev.forEach(e=>{if(e.n.type==="note"&&e.n.el)out.push(e.n);}));
@@ -1170,7 +1173,7 @@ body.fs-open{overflow:hidden}
   function lockPlay(){if(!$("earnPlay").checked)return;const l=playLocks();l[tuneKey()]=1;store.set("cps.playLocks",l);lis.heard=new Set();lis.unlocked=false;}
   function unlockPlay(){const l=playLocks();delete l[tuneKey()];store.set("cps.playLocks",l);setPlayLabel(playing?"Stop":"Play");}
   function updatePlayUI(){
-    const off=lis.on||(playLocked()&&!playing);
+    const off=playLocked()&&!playing;
     ["play","fsPlay"].forEach(id=>{$(id).disabled=off;$(id).title=playLocked()&&!playing?"Play the whole tune with Listen to use Play again":"";
       if(!playing)$(id).textContent=playLocked()?"Play 🔒":"Play";});
     if(!lis.on)setHeard(playLocked()?"Play the whole tune with Listen, then Play works again.":"");
@@ -1188,7 +1191,7 @@ body.fs-open{overflow:hidden}
     const k={1:"C#",3:"D#",6:"F#",8:"G#",10:"A#"}[pc];
     return (blackColours&&blackColours[k])||"#555";
   }
-  async function startListen(){
+  async function startListen(afterPlay){
     if(lis.on) return;
     if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
       setHeard("This browser cannot use the microphone on this page. Try Chrome, Safari or Edge, opened from the https:// address.");return;}
@@ -1210,6 +1213,8 @@ body.fs-open{overflow:hidden}
     lis.src.connect(lis.an); // not connected to the speakers, so no feedback
     lis.buf=new Float32Array(lis.an.fftSize);
     lis.on=true;lis.cand=-1;lis.candN=0;lis.lastPc=-1;lis.struck=true;lis.heardPc=-1;lis.fb=[];
+    // straight after Play the speaker is still ringing, so the first note needs a fresh key press
+    lis.needStrike=!!afterPlay;if(afterPlay){lis.struck=false;lis.hist=[];lis.matchAt=performance.now();}
     if(lis.idx>=melody().length) lis.idx=0;
     setListenLabel();setHeard("Listening… play the glowing note.");
     listenMarks();followTarget();
@@ -1283,13 +1288,15 @@ body.fs-open{overflow:hidden}
     const t=lisTarget();if(!t) return;
     const want=((t.midi%12)+12)%12;
     if(pc!==want){ if(lis.struck&&lis.candN>=6&&pc!==lis.lastPc) lis.struck=false; return; }
-    if(pc===lis.lastPc&&(!lis.struck||lis.candN<5)) return; // same note still ringing: wait for a new press
-    lis.lastPc=pc;lis.struck=false;lis.hist=[];lis.matchAt=performance.now();
+    if((pc===lis.lastPc||lis.needStrike)&&(!lis.struck||lis.candN<5)) return; // same note still ringing: wait for a new press
+    lis.lastPc=pc;lis.struck=false;lis.needStrike=false;lis.hist=[];lis.matchAt=performance.now();
     lis.heard.add(lis.idx);lis.idx++;
     if(playLocked()&&mel().length&&mel().every((n,i)=>lis.heard.has(i))){unlockPlay();lis.unlocked=true;}
     listenMarks();followTarget();
   }
   $("listen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
+  const autoPref=store.get("cps.autoListen");if(autoPref!==null)$("autoListen").checked=!!autoPref;
+  $("autoListen").addEventListener("change",()=>store.set("cps.autoListen",$("autoListen").checked));
   const earnPref=store.get("cps.earnPlay");if(earnPref!==null)$("earnPlay").checked=!!earnPref;
   $("earnPlay").addEventListener("change",()=>{store.set("cps.earnPlay",$("earnPlay").checked);updatePlayUI();});
   $("fsListen").addEventListener("click",()=>{lis.on?stopListen():startListen();});
